@@ -162,6 +162,10 @@ def safely_remove(path, search_by_mount_points=True):
     if not drive_name:
         print(f"Could not find a drive for {path}", file=sys.stderr)
         sys.exit(1)
+    drive = bus.get("org.freedesktop.UDisks2", drive_name)
+    if not drive['org.freedesktop.UDisks2.Drive'].Removable:
+        print(f"Refusing to umount non-removable drive: {drive_name}", file=sys.stderr)
+        sys.exit(2)
 
     block_devices = find_block_devices_using_drive(drive_name)
     log.debug("Proceeding to unmount all block devices in the drive.")
@@ -179,7 +183,6 @@ def safely_remove(path, search_by_mount_points=True):
                 if unlocked:
                     block_device['org.freedesktop.UDisks2.Encrypted'].Lock({})
 
-        drive = bus.get("org.freedesktop.UDisks2", drive_name)
         if drive['org.freedesktop.UDisks2.Drive'].MediaRemovable:
             # Eject the media. This will turn off the light on "has media" light in a SD card
             # reader and eject optical disks from CD drives.
