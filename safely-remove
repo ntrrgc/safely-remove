@@ -20,10 +20,11 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-__version__ = "1.0"
+__version__ = "1.1"
 import os
 import logging
 import sys
+from gi.repository import GLib
 
 from pydbus import SystemBus
 
@@ -164,25 +165,30 @@ def safely_remove(path, search_by_mount_points=True):
 
     block_devices = find_block_devices_using_drive(drive_name)
     log.debug("Proceeding to unmount all block devices in the drive.")
-    for block_device_name in block_devices:
-        block_device = bus.get("org.freedesktop.UDisks2", block_device_name)
-        if support_interface(block_device, 'org.freedesktop.UDisks2.Filesystem'):
-            log.debug(f'Found filesystem, unmounting: {block_device_name}')
-            block_device['org.freedesktop.UDisks2.Filesystem'].Unmount({})
-        if support_interface(block_device, 'org.freedesktop.UDisks2.Encrypted'):
-            log.debug(f"Found crypto backing device, locking: {block_device_name}")
-            block_device['org.freedesktop.UDisks2.Encrypted'].Lock({})
+    try:
+        for block_device_name in block_devices:
+            block_device = bus.get("org.freedesktop.UDisks2", block_device_name)
+            if support_interface(block_device, 'org.freedesktop.UDisks2.Filesystem'):
+                log.debug(f'Found filesystem, unmounting: {block_device_name}')
+                block_device['org.freedesktop.UDisks2.Filesystem'].Unmount({})
+            if support_interface(block_device, 'org.freedesktop.UDisks2.Encrypted'):
+                log.debug(f"Found crypto backing device, locking: {block_device_name}")
+                block_device['org.freedesktop.UDisks2.Encrypted'].Lock({})
 
-    # Now, eject the drive. This will remove it from the file explorer, turn off the light on "has media"
-    # light in a SD card reader and eject optical disks from CD drives.
-    log.debug(f"Ejecting drive: {drive_name}")
-    drive = bus.get("org.freedesktop.UDisks2", drive_name)
-    drive['org.freedesktop.UDisks2.Drive'].Eject({})
+        # Now, eject the drive. This will remove it from the file explorer, turn off the light on "has media"
+        # light in a SD card reader and eject optical disks from CD drives.
+        log.debug(f"Ejecting drive: {drive_name}")
+        drive = bus.get("org.freedesktop.UDisks2", drive_name)
+        drive['org.freedesktop.UDisks2.Drive'].Eject({})
 
-    # And to complete, if the drive does not use removable media (SD card reader, CD drive) power it off completely.
-    if not drive['org.freedesktop.UDisks2.Drive'].MediaRemovable:
-        log.debug(f"Powering off non-removable media drive: {drive_name}")
-        drive['org.freedesktop.UDisks2.Drive'].PowerOff({})
+        # And to complete, if the drive does not use removable media (SD card reader, CD drive) power it off completely.
+        if not drive['org.freedesktop.UDisks2.Drive'].MediaRemovable:
+            log.debug(f"Powering off non-removable media drive: {drive_name}")
+            drive['org.freedesktop.UDisks2.Drive'].PowerOff({})
+    except GLib.GError as error:
+        # Catch errors thrown by the bus (e.g. target is busy)
+        print(error, file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == '__main__':
@@ -190,10 +196,10 @@ if __name__ == '__main__':
 
     parser = ArgumentParser(description="Safely ejects a device, just like Nautilus does. Doesn't require root.")
     parser.add_argument("--version", action="version", version=f"safely-remove {__version__}")
-    parser.add_argument("--raw-device", dest="raw_device", action="store_true", help="Interpret PATH as a device path, don't try to resolve a mount point.")
-    parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="Show debug info.")
+    parser.add_argument("--raw-device", dest="raw_device", action="store_true", help="interpret path as a device path, don't try to resolve a mount point")
+    parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="show debug info")
     parser.add_argument("path",
-                        help="Path of the device to unmount, be it raw (e.g. /dev/sdc1), a mount point (/var/mount/...) or a path within a mount point.")
+                        help="path of the device to unmount, be it raw (e.g. /dev/sdc1), a mount point (/var/mount/...) or a path within a mount point")
 
     args = parser.parse_args()
     if args.debug:

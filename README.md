@@ -6,32 +6,33 @@ This is all done with the same UDisks2 DBus interface that file managers use, so
 
 This has been tested with:
 
-* USB thumb drives.
-* External hard drives with luks encryption.
-* SD cards with multiple partitions.
-* CD/DVD drives.
+* USB thumb drives
+* External hard drives with luks encryption
+* SD cards with multiple partitions
+* CD/DVD drives
 
 ## Requirements
 
- * Python 3.6+
- * pydbus
+* Python 3.6+
+* pydbus
 
 ## Usage
 
 ```
-usage: safely-remove [-h] [--raw-device] [-d] path
+usage: safely-remove [-h] [--version] [--raw-device] [-d] path
 
 Safely ejects a device, just like Nautilus does. Doesn't require root.
 
 positional arguments:
-  path          Path of the device to unmount, be it raw (e.g. /dev/sdc1), a
-                mount point (/var/mount/...) or a path within a mount point.
+  path          path of the device to unmount, be it raw (e.g. /dev/sdc1), a
+                mount point (/var/mount/...) or a path within a mount point
 
 optional arguments:
   -h, --help    show this help message and exit
-  --raw-device  Interpret PATH as a device path, don't try to resolve a mount
-                point.
-  -d, --debug   Show debug info.
+  --version     show program's version number and exit
+  --raw-device  interpret path as a device path, don't try to resolve a mount
+                point
+  -d, --debug   show debug info
 ```
 
 ## License
