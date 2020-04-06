@@ -11,6 +11,11 @@ This has been tested with:
 * SD cards with multiple partitions.
 * CD/DVD drives.
 
+## Requirements
+
+ * Python 3.6+
+ * pydbus
+
 ## Usage
 
 ```
