@@ -1,0 +1,201 @@
+#!/usr/bin/python3
+# safely-remove: A command-line tool to eject external data devices.
+#
+# (c) 2020 Alicia Boya Garcia
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+__version__ = "1.0"
+import os
+import logging
+import sys
+
+from pydbus import SystemBus
+
+bus = SystemBus()
+log = logging.getLogger("safely-remove")
+
+
+def decode_path(path_bytes):
+    # The mount_point received by the dbus API is a zero-terminated byte array
+    assert path_bytes[-1] == 0
+    return os.fsdecode(bytes(path_bytes[:-1]))
+
+
+def mount_point_contains_path(mount_point, real_path):
+    mount_point = decode_path(mount_point)
+    return (real_path + "/").startswith(os.path.realpath(mount_point) + "/")
+
+
+def find_device_by_mount_point(block_devices, real_path_containing_mount_point):
+    matches = [
+        (object_path, interfaces)
+        for object_path, interfaces in block_devices.items()
+        if any(
+            mount_point_contains_path(mount_point, real_path_containing_mount_point)
+            for mount_point in interfaces.get("org.freedesktop.UDisks2.Filesystem", {}).get("MountPoints", [])
+        )
+    ]
+    assert len(matches) <= 1, matches
+    return matches[0] if len(matches) > 0 else None
+
+
+def find_device_by_raw_device_path(block_devices, real_path):
+    matches = [
+        (object_path, interfaces)
+        for object_path, interfaces in block_devices.items()
+        if interfaces.get("org.freedesktop.UDisks2.Block", {}).get("Device") is not None
+           and decode_path(interfaces.get("org.freedesktop.UDisks2.Block", {}).get("Device")) == real_path
+    ]
+    assert len(matches) <= 1, matches
+    return matches[0] if len(matches) > 0 else None
+
+
+# Returns something like '/org/freedesktop/UDisks2/block_devices/dm_2d1',
+# offering a org.freedesktop.UDisks2.Filesystem interface that can be used to
+# unmount, and a org.freedesktop.UDisks2.Block interface that can be used to
+# check for CryptoBackingDevice.
+def find_device_by_path(block_devices, path, search_by_mount_points=True):
+    real_path = os.path.realpath(path)
+
+    log.debug("Searching device by raw device path: %s" % real_path)
+    match = find_device_by_raw_device_path(block_devices, real_path)
+
+    if not match and search_by_mount_points:
+        log.debug("Searching for device with a mount point containing: %s" % real_path)
+        match = find_device_by_mount_point(block_devices, real_path)
+
+    if match:
+        log.debug("Found device: %s" % match[0])
+    else:
+        log.debug("Did not found the device.")
+    return match
+
+
+def get_block_devices():
+    udisks = bus.get(
+        "org.freedesktop.UDisks2",
+        "/org/freedesktop/UDisks2"
+    )
+    return dict(
+        (object_path, interfaces)
+        for object_path, interfaces in udisks.GetManagedObjects().items()
+        if object_path.startswith("/org/freedesktop/UDisks2/block_devices/")
+    )
+
+
+def find_drive_by_path(path, search_by_mount_points=True):
+    filesystem_match = find_device_by_path(get_block_devices(), path, search_by_mount_points=search_by_mount_points)
+    if not filesystem_match:
+        return None
+
+    # Found a device, probably with a file system.
+    device_name = filesystem_match[0]
+
+    # Traverse any crypto backing devices
+    while True:
+        crypto_backing_device = bus.get("org.freedesktop.UDisks2", device_name)['org.freedesktop.UDisks2.Block'].CryptoBackingDevice
+        if crypto_backing_device == "/":
+            break
+        log.debug(f"Traversing crypto backing device: {crypto_backing_device}")
+        device_name = crypto_backing_device
+
+    drive = bus.get("org.freedesktop.UDisks2", device_name).Drive
+    log.debug(f"Found drive: {drive}")
+    return drive
+
+
+def find_block_devices_using_drive(drive):
+    all_block_devices = get_block_devices()
+    drive_block_devices = []
+
+    log.debug(f"Looking for the entire tree of block devices using drive: {drive}")
+    for block_device, interfaces in all_block_devices.items():
+        if interfaces['org.freedesktop.UDisks2.Block']['Drive'] == drive:
+            log.debug(f"Found block device: {block_device}")
+            drive_block_devices.append(block_device)
+
+    # Let's look for encrypted filesystems using the drive block devices we know
+    while True:
+        need_rescan = False
+        for block_device, interfaces in all_block_devices.items():
+            if block_device in drive_block_devices:
+                continue
+            if interfaces['org.freedesktop.UDisks2.Block']['CryptoBackingDevice'] in drive_block_devices:
+                # In theory there may even be recursive crypto devices
+                need_rescan = True
+                log.debug(f"Found encrypted block device: {block_device}")
+                drive_block_devices.append(block_device)
+        if not need_rescan:
+            break
+
+    # Devices must be unmounted/locked in reverse order they were found
+    return list(reversed(drive_block_devices))
+
+
+def support_interface(dbus_object, interface_name):
+    try:
+        dbus_object[interface_name]
+        return True
+    except KeyError:
+        return False
+
+
+def safely_remove(path, search_by_mount_points=True):
+    drive_name = find_drive_by_path(path, search_by_mount_points)
+    if not drive_name:
+        print(f"Could not find a drive for {path}", file=sys.stderr)
+        sys.exit(1)
+
+    block_devices = find_block_devices_using_drive(drive_name)
+    log.debug("Proceeding to unmount all block devices in the drive.")
+    for block_device_name in block_devices:
+        block_device = bus.get("org.freedesktop.UDisks2", block_device_name)
+        if support_interface(block_device, 'org.freedesktop.UDisks2.Filesystem'):
+            log.debug(f'Found filesystem, unmounting: {block_device_name}')
+            block_device['org.freedesktop.UDisks2.Filesystem'].Unmount({})
+        if support_interface(block_device, 'org.freedesktop.UDisks2.Encrypted'):
+            log.debug(f"Found crypto backing device, locking: {block_device_name}")
+            block_device['org.freedesktop.UDisks2.Encrypted'].Lock({})
+
+    # Now, eject the drive. This will remove it from the file explorer, turn off the light on "has media"
+    # light in a SD card reader and eject optical disks from CD drives.
+    log.debug(f"Ejecting drive: {drive_name}")
+    drive = bus.get("org.freedesktop.UDisks2", drive_name)
+    drive['org.freedesktop.UDisks2.Drive'].Eject({})
+
+    # And to complete, if the drive does not use removable media (SD card reader, CD drive) power it off completely.
+    if not drive['org.freedesktop.UDisks2.Drive'].MediaRemovable:
+        log.debug(f"Powering off non-removable media drive: {drive_name}")
+        drive['org.freedesktop.UDisks2.Drive'].PowerOff({})
+
+
+if __name__ == '__main__':
+    from argparse import ArgumentParser
+
+    parser = ArgumentParser(description="Safely ejects a device, just like Nautilus does. Doesn't require root.")
+    parser.add_argument("--version", action="version", version=f"safely-remove {__version__}")
+    parser.add_argument("--raw-device", dest="raw_device", action="store_true", help="Interpret PATH as a device path, don't try to resolve a mount point.")
+    parser.add_argument("-d", "--debug", dest="debug", action="store_true", help="Show debug info.")
+    parser.add_argument("path",
+                        help="Path of the device to unmount, be it raw (e.g. /dev/sdc1), a mount point (/var/mount/...) or a path within a mount point.")
+
+    args = parser.parse_args()
+    if args.debug:
+        logging.basicConfig(level=logging.DEBUG)
+    safely_remove(args.path, search_by_mount_points=not args.raw_device)
