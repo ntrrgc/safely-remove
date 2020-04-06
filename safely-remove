@@ -20,7 +20,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-__version__ = "1.1"
+__version__ = "1.2"
 import os
 import logging
 import sys
@@ -169,20 +169,25 @@ def safely_remove(path, search_by_mount_points=True):
         for block_device_name in block_devices:
             block_device = bus.get("org.freedesktop.UDisks2", block_device_name)
             if support_interface(block_device, 'org.freedesktop.UDisks2.Filesystem'):
-                log.debug(f'Found filesystem, unmounting: {block_device_name}')
-                block_device['org.freedesktop.UDisks2.Filesystem'].Unmount({})
+                mounted = len(block_device['org.freedesktop.UDisks2.Filesystem'].MountPoints) > 0
+                log.debug(f"Found filesystem, {'unmounting' if mounted else 'already unmounted'}: {block_device_name}")
+                if mounted:
+                    block_device['org.freedesktop.UDisks2.Filesystem'].Unmount({})
             if support_interface(block_device, 'org.freedesktop.UDisks2.Encrypted'):
-                log.debug(f"Found crypto backing device, locking: {block_device_name}")
-                block_device['org.freedesktop.UDisks2.Encrypted'].Lock({})
+                unlocked = block_device['org.freedesktop.UDisks2.Encrypted'].CleartextDevice != "/"
+                log.debug(f"Found crypto backing device, {'locking' if unlocked else 'already unlocked'}: {block_device_name}")
+                if unlocked:
+                    block_device['org.freedesktop.UDisks2.Encrypted'].Lock({})
 
-        # Now, eject the drive. This will remove it from the file explorer, turn off the light on "has media"
-        # light in a SD card reader and eject optical disks from CD drives.
-        log.debug(f"Ejecting drive: {drive_name}")
         drive = bus.get("org.freedesktop.UDisks2", drive_name)
-        drive['org.freedesktop.UDisks2.Drive'].Eject({})
-
-        # And to complete, if the drive does not use removable media (SD card reader, CD drive) power it off completely.
-        if not drive['org.freedesktop.UDisks2.Drive'].MediaRemovable:
+        if drive['org.freedesktop.UDisks2.Drive'].MediaRemovable:
+            # Eject the media. This will turn off the light on "has media" light in a SD card
+            # reader and eject optical disks from CD drives.
+            # UDisk2 under the hood calls the `eject` command, which can fail for hard drives.
+            log.debug(f"Ejecting drive: {drive_name}")
+            drive['org.freedesktop.UDisks2.Drive'].Eject({})
+        else:
+            # If the drive does not use removable media, power it off completely.
             log.debug(f"Powering off non-removable media drive: {drive_name}")
             drive['org.freedesktop.UDisks2.Drive'].PowerOff({})
     except GLib.GError as error:
